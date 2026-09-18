@@ -4,9 +4,8 @@ eka-createBrush is a Blender 4.2+ extension for creating reusable Sculpt Mode br
 
 ## Interface Preview
 
-![eka-createBrush in Blender Sculpt Mode](Blender-eka-createBrush/docs/eka-createBrush-ui.png)
+![alt text](Blender-eka-createBrush/docs/eka-crackBrush-ui.png)
 
-*A real Stone Pores stroke on the mesh, with four folder-synced brushes visible in the eka-createBrush gallery.*
 
 ## Features
 
@@ -51,6 +50,9 @@ Every valid image in the selected folder appears directly in the gallery. Select
 - Use **Use Brush** to keep the brush's saved mapping and stroke settings.
 
 Sculpting moves existing mesh vertices. If the panel reports low mesh detail, enable Dyntopo, voxel-remesh at a fine size, or use a Multiresolution modifier before applying a detailed image.
+
+![eka-createBrush in Blender Sculpt Mode](Blender-eka-createBrush/docs/eka-createBrush-ui.png)
+*A real Stone Pores stroke on the mesh, with four folder-synced brushes visible in the eka-createBrush gallery.*
 
 ## Image Guidelines
 
