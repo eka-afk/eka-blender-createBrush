@@ -35,13 +35,14 @@ def load_addon():
 
 
 def save_pattern(path):
-    size = 256
-    image = bpy.data.images.new(path.stem, width=size, height=size, alpha=True)
+    width = 320
+    height = 160
+    image = bpy.data.images.new(path.stem, width=width, height=height, alpha=True)
     pixels = []
-    for y_coordinate in range(size):
-        y_value = ((y_coordinate / (size - 1)) * 2.0) - 1.0
-        for x_coordinate in range(size):
-            x_value = ((x_coordinate / (size - 1)) * 2.0) - 1.0
+    for y_coordinate in range(height):
+        y_value = ((y_coordinate / (height - 1)) * 2.0) - 1.0
+        for x_coordinate in range(width):
+            x_value = ((x_coordinate / (width - 1)) * 2.0) - 1.0
             radius = math.hypot(x_value, y_value)
             value = 0.5 + (0.42 * math.sin((radius * 34.0) + (x_value * 5.0)))
             value *= max(0.0, min(1.0, (1.0 - radius) * 3.0))
@@ -91,7 +92,8 @@ def set_up_scene():
         },
     )
     addon.runtime.refresh_previews(force=True)
-    addon.runtime.activate_brush(bpy.context, item)
+    brush = addon.runtime.activate_brush(bpy.context, item)
+    assert tuple(brush.texture_slot.scale) == (1.0, 2.0, 1.0)
 
     window, area, region = view3d_context()
     space = area.spaces.active

@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+from unittest.mock import patch
 
 import bpy
 
@@ -98,10 +99,16 @@ def main():
 
         analysis = addon.runtime.analyze_brush_image(str(grayscale_path))
         assert analysis["width"] == analysis["height"] == 32
+        assert analysis["aspect_fitted"] is False
         assert analysis["dynamic_range"] > 0.9
         assert analysis["low_contrast"] is False
         expect_image_error(addon, color_path, "must be grayscale")
-        expect_image_error(addon, rectangle_path, "must be square")
+        rectangle_analysis = addon.runtime.analyze_brush_image(str(rectangle_path))
+        assert rectangle_analysis["width"] == 24
+        assert rectangle_analysis["height"] == 16
+        assert rectangle_analysis["aspect_fitted"] is True
+        assert addon.runtime.image_aspect_scale(24, 16) == (1.0, 1.5, 1.0)
+        assert addon.runtime.image_aspect_scale(16, 24) == (1.5, 1.0, 1.0)
 
         assert bpy.ops.eka_create_brush.import_brush(
             filepath=str(grayscale_path),
@@ -127,6 +134,13 @@ def main():
         assert len(preview_items) == 1
         assert preview_items[0][0] == item["id"]
         assert item["id"] in addon.runtime._preview_collection
+        with patch.object(
+            addon.runtime.BrushLibrary,
+            "folder_stamp",
+            side_effect=AssertionError("cached gallery performed a folder scan"),
+        ):
+            assert addon.runtime.preview_items()[0][0] == item["id"]
+            assert addon._selected_item(bpy.context.window_manager.eka_create_brush) == item
         panel_settings = bpy.context.window_manager.eka_create_brush
         panel_settings.search = "no matching brush"
         assert panel_settings.selected_brush == "__EMPTY__"
@@ -147,9 +161,50 @@ def main():
         assert brush.spacing == 17
         assert brush.use_frontface is True
         assert brush.texture_slot.map_mode == "AREA_PLANE"
+        assert brush.texture.extension == "CLIP"
+        if hasattr(brush, "use_scene_spacing"):
+            assert brush.use_scene_spacing == "SCENE"
+        if hasattr(brush, "use_adaptive_space"):
+            assert brush.use_adaptive_space is True
         if hasattr(bpy.context.tool_settings.sculpt, "brush"):
             assert bpy.context.tool_settings.sculpt.brush == brush
         assert addon.runtime.find_runtime_brush(item["id"]) == brush
+
+        assert bpy.ops.eka_create_brush.import_brush(
+            filepath=str(rectangle_path),
+            brush_name="Wide Detail",
+            activate_after_import=False,
+        ) == {"FINISHED"}
+        rectangle_item = next(
+            entry for entry in addon.runtime.library().items() if entry["name"] == "Wide Detail"
+        )
+        rectangle_brush = addon.runtime.find_runtime_brush(rectangle_item["id"])
+        assert rectangle_brush is not None
+        assert tuple(rectangle_brush.texture_slot.scale) == (1.0, 1.5, 1.0)
+
+        assert bpy.ops.eka_create_brush.use(
+            brush_id=item["id"],
+            application="SURFACE",
+        ) == {"FINISHED"}
+        surface_item = addon.runtime.library().get(item["id"])
+        assert surface_item["settings"]["mapping"] == "TILED"
+        assert surface_item["settings"]["stroke_method"] == "SPACE"
+        assert surface_item["settings"]["spacing"] == 25
+        assert brush.texture_slot.map_mode == "TILED"
+        assert brush.texture.extension == "REPEAT"
+
+        assert bpy.ops.eka_create_brush.use(
+            brush_id=item["id"],
+            application="STAMP",
+        ) == {"FINISHED"}
+        stamp_item = addon.runtime.library().get(item["id"])
+        assert stamp_item["settings"]["mapping"] == "AREA_PLANE"
+        assert stamp_item["settings"]["stroke_method"] == "DRAG_DOT"
+        assert stamp_item["settings"]["falloff"] == "CONSTANT"
+        assert stamp_item["settings"]["use_pressure_size"] is False
+        assert stamp_item["settings"]["use_pressure_strength"] is False
+        assert brush.texture_slot.map_mode == "AREA_PLANE"
+        assert brush.texture.extension == "CLIP"
 
         stored_path = addon.runtime.library().image_path(item)
         assert stored_path.is_file()
@@ -160,8 +215,8 @@ def main():
         dropped_path = library_directory / "Fabric Weave.png"
         save_test_image(
             dropped_path,
-            32,
-            32,
+            16,
+            24,
             lambda x, y: (
                 0.25 + (0.5 if (x // 4 + y // 4) % 2 else 0.0),
                 0.25 + (0.5 if (x // 4 + y // 4) % 2 else 0.0),
@@ -174,8 +229,11 @@ def main():
             entry for entry in addon.runtime.library().items() if entry["image"] == dropped_path.name
         )
         assert dropped["name"] == "Fabric Weave"
+        assert dropped["width"] == 16
+        assert dropped["height"] == 24
         assert dropped["id"] in {entry[0] for entry in addon.runtime.preview_items()}
         dropped_brush = addon.runtime.activate_brush(bpy.context, dropped)
+        assert tuple(dropped_brush.texture_slot.scale) == (1.5, 1.0, 1.0)
         assert addon.runtime.find_runtime_brush(dropped["id"]) == dropped_brush
 
         renamed_path = dropped_path.with_name("Fabric Grid.png")
@@ -223,6 +281,7 @@ def main():
 
         addon.unregister()
         assert not hasattr(bpy.types.WindowManager, "eka_create_brush")
+        assert not bpy.app.timers.is_registered(addon.runtime._watch_library)
         print(
             "EKA_CREATE_BRUSH_SMOKE_TEST_PASS "
             f"blender={bpy.app.version_string} preview_loaded=True folder_sync=True"

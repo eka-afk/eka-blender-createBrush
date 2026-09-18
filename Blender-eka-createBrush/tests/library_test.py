@@ -34,6 +34,9 @@ def main():
         assert library.image_path(first).read_bytes() == source.read_bytes()
         assert first["settings"]["strength"] == 0.7
         assert first["settings"]["spacing"] == DEFAULT_SETTINGS["spacing"]
+        assert first["settings"]["mapping"] == "AREA_PLANE"
+        assert second["settings"]["mapping"] == "TILED"
+        assert second["settings"]["spacing"] == 25
         assert len(library.items()) == 2
 
         updated = library.update(

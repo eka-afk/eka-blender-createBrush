@@ -84,6 +84,11 @@ def create_scene(addon):
     bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=6, radius=2.1)
     target = bpy.context.object
     target.name = "Sculpt Surface"
+    subdivision = target.modifiers.new("Sculpt Detail", "SUBSURF")
+    subdivision.subdivision_type = "SIMPLE"
+    subdivision.levels = 2
+    bpy.context.view_layer.objects.active = target
+    bpy.ops.object.modifier_apply(modifier=subdivision.name)
     TARGET = target
     for polygon in target.data.polygons:
         polygon.use_smooth = True
@@ -95,10 +100,10 @@ def create_scene(addon):
             name,
             analysis,
             {
-                "strength": 1.2 if name == "Stone Pores" else 0.5 + (index * 0.08),
+                "strength": 0.65 if name == "Stone Pores" else 0.5 + (index * 0.08),
                 "size": 180 if name == "Stone Pores" else 105 + (index * 15),
-                "spacing": 12 + (index * 3),
-                "mapping": "AREA_PLANE" if index != 3 else "TILED",
+                "spacing": 25 if name == "Stone Pores" else 12 + (index * 3),
+                "mapping": "TILED" if name in {"Stone Pores", "Fabric Weave"} else "AREA_PLANE",
             },
         )
         if name == "Stone Pores":

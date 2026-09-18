@@ -7,7 +7,7 @@ import tomllib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRECTORY = PROJECT_ROOT / "eka_create_brush"
-ARCHIVE_PATH = PROJECT_ROOT / "dist" / "eka-createBrush-1.1.0.zip"
+ARCHIVE_PATH = PROJECT_ROOT / "dist" / "eka-createBrush-1.3.0.zip"
 EXPECTED_FILES = {
     "__init__.py",
     "blender_manifest.toml",
@@ -30,7 +30,7 @@ def main():
 
     assert manifest["id"] == "eka_create_brush"
     assert manifest["name"] == "eka-createBrush"
-    assert manifest["version"] == "1.1.0"
+    assert manifest["version"] == "1.3.0"
     assert manifest["blender_version_min"] == "4.2.0"
     assert "files" in manifest["permissions"]
     assert set(manifest["build"]["paths"]) == EXPECTED_FILES - {"blender_manifest.toml"}

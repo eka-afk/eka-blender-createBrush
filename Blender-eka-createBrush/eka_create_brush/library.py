@@ -16,12 +16,12 @@ INDEX_FILENAME = "brushes.json"
 SUPPORTED_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 DEFAULT_SETTINGS = {
     "tool": "DRAW",
-    "mapping": "AREA_PLANE",
+    "mapping": "TILED",
     "stroke_method": "SPACE",
     "falloff": "SMOOTH",
     "strength": 0.5,
     "size": 75,
-    "spacing": 12,
+    "spacing": 25,
     "texture_bias": 0.0,
     "invert": False,
     "use_pressure_size": True,

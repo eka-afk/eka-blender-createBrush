@@ -44,6 +44,12 @@ FALLOFF_ITEMS = (
     ("CONSTANT", "Constant", "Use the image without an extra radial fade"),
 )
 
+APPLICATION_ITEMS = (
+    ("SAVED", "Saved Settings", "Use this brush's saved mapping and stroke settings"),
+    ("STAMP", "Stamp", "Place one faithful image dab using Area Plane mapping"),
+    ("SURFACE", "Tile Surface", "Paint a continuous fixed texture across the surface"),
+)
+
 
 def _addon_preferences(context):
     addon = context.preferences.addons.get(__package__)
@@ -90,10 +96,7 @@ def _selected_item(settings):
     brush_id = settings.selected_brush
     if not brush_id or brush_id == "__EMPTY__":
         return None
-    try:
-        return runtime.library().get(brush_id)
-    except BrushLibraryError:
-        return None
+    return runtime.cached_library_item(brush_id)
 
 
 def _selection_updated(settings, context):
@@ -164,6 +167,21 @@ def _load_operator_settings(operator, item):
     operator.accumulate = settings["accumulate"]
 
 
+def _application_settings(item, application):
+    settings = dict(item["settings"])
+    if application == "STAMP":
+        settings.update(
+            mapping="AREA_PLANE",
+            stroke_method="DRAG_DOT",
+            falloff="CONSTANT",
+            use_pressure_size=False,
+            use_pressure_strength=False,
+        )
+    elif application == "SURFACE":
+        settings.update(mapping="TILED", stroke_method="SPACE", spacing=25)
+    return settings
+
+
 def _draw_operator_settings(layout, operator, *, show_name=True):
     layout.use_property_split = True
     layout.use_property_decorate = False
@@ -196,7 +214,7 @@ def _draw_operator_settings(layout, operator, *, show_name=True):
 class EKACREATEBRUSH_OT_import(Operator, ImportHelper):
     bl_idname = "eka_create_brush.import_brush"
     bl_label = "Import Grayscale Brush"
-    bl_description = "Create and store a Sculpt brush from a square grayscale image"
+    bl_description = "Create and store a Sculpt brush from a grayscale image of any aspect ratio"
     bl_options = {"REGISTER"}
 
     filename_ext = ""
@@ -206,12 +224,12 @@ class EKACREATEBRUSH_OT_import(Operator, ImportHelper):
     )
     brush_name: StringProperty(name="Brush Name", maxlen=80)
     tool: EnumProperty(name="Tool", items=TOOL_ITEMS, default="DRAW")
-    mapping: EnumProperty(name="Mapping", items=MAPPING_ITEMS, default="AREA_PLANE")
+    mapping: EnumProperty(name="Mapping", items=MAPPING_ITEMS, default="TILED")
     stroke_method: EnumProperty(name="Stroke", items=STROKE_ITEMS, default="SPACE")
     falloff: EnumProperty(name="Falloff", items=FALLOFF_ITEMS, default="SMOOTH")
     strength: FloatProperty(name="Strength", default=0.5, min=0.0, max=10.0)
     size: IntProperty(name="Size", default=75, min=1, max=5000, subtype="PIXEL")
-    spacing: IntProperty(name="Spacing", default=12, min=1, max=1000, subtype="PERCENTAGE")
+    spacing: IntProperty(name="Spacing", default=25, min=1, max=1000, subtype="PERCENTAGE")
     texture_bias: FloatProperty(
         name="Height Bias",
         description="Shift image values before they affect the surface",
@@ -247,7 +265,8 @@ class EKACREATEBRUSH_OT_import(Operator, ImportHelper):
             runtime.refresh_previews(force=True)
             panel_settings = context.window_manager.eka_create_brush
             panel_settings.selected_brush = item["id"]
-            panel_settings.status = f"Imported: {item['name']}"
+            aspect_note = " - aspect auto-fit" if image_info["aspect_fitted"] else ""
+            panel_settings.status = f"Imported: {item['name']}{aspect_note}"
         except (BrushLibraryError, runtime.BrushImageError) as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
@@ -265,6 +284,12 @@ class EKACREATEBRUSH_OT_import(Operator, ImportHelper):
             self.report({"WARNING"}, activation_warning)
         elif image_info["low_contrast"]:
             self.report({"WARNING"}, "Brush imported, but the image has very low tonal contrast")
+        elif image_info["aspect_fitted"]:
+            self.report(
+                {"INFO"},
+                f"Imported {item['name']} and auto-fit "
+                f"{image_info['width']} x {image_info['height']} without stretching",
+            )
         else:
             self.report({"INFO"}, f"Imported {item['name']}")
         return {"FINISHED"}
@@ -277,6 +302,12 @@ class EKACREATEBRUSH_OT_use(Operator):
     bl_options = {"REGISTER"}
 
     brush_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    application: EnumProperty(
+        name="Application",
+        items=APPLICATION_ITEMS,
+        default="SAVED",
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
 
     def execute(self, context):
         panel_settings = context.window_manager.eka_create_brush
@@ -285,13 +316,23 @@ class EKACREATEBRUSH_OT_use(Operator):
             item = runtime.library().get(brush_id)
             if item is None:
                 raise runtime.BrushActivationError("Select a brush from the library")
+            if self.application != "SAVED":
+                item = runtime.library().update(
+                    brush_id,
+                    settings=_application_settings(item, self.application),
+                )
+                runtime.refresh_previews(force=True, synchronize=False)
             brush = runtime.activate_brush(context, item)
         except (BrushLibraryError, runtime.BrushActivationError) as error:
             panel_settings.status = str(error)
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
         panel_settings.selected_brush = item["id"]
-        panel_settings.status = f"Active: {item['name']}"
+        suffix = {
+            "STAMP": " - single stamp",
+            "SURFACE": " - tiled surface",
+        }.get(self.application, "")
+        panel_settings.status = f"Active: {item['name']}{suffix}"
         self.report({"INFO"}, f"Using {brush.name}")
         return {"FINISHED"}
 
@@ -325,12 +366,12 @@ class EKACREATEBRUSH_OT_edit(Operator):
     brush_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     brush_name: StringProperty(name="Brush Name", maxlen=80)
     tool: EnumProperty(name="Tool", items=TOOL_ITEMS, default="DRAW")
-    mapping: EnumProperty(name="Mapping", items=MAPPING_ITEMS, default="AREA_PLANE")
+    mapping: EnumProperty(name="Mapping", items=MAPPING_ITEMS, default="TILED")
     stroke_method: EnumProperty(name="Stroke", items=STROKE_ITEMS, default="SPACE")
     falloff: EnumProperty(name="Falloff", items=FALLOFF_ITEMS, default="SMOOTH")
     strength: FloatProperty(name="Strength", default=0.5, min=0.0, max=10.0)
     size: IntProperty(name="Size", default=75, min=1, max=5000, subtype="PIXEL")
-    spacing: IntProperty(name="Spacing", default=12, min=1, max=1000, subtype="PERCENTAGE")
+    spacing: IntProperty(name="Spacing", default=25, min=1, max=1000, subtype="PERCENTAGE")
     texture_bias: FloatProperty(name="Height Bias", default=0.0, min=-1.0, max=1.0)
     invert: BoolProperty(name="Invert Image", default=False)
     use_pressure_size: BoolProperty(name="Pressure Size", default=True)
@@ -543,13 +584,34 @@ class EKACREATEBRUSH_PT_main(Panel):
         if item is None:
             empty = layout.column(align=True)
             empty.enabled = False
-            empty.label(text="Import a square grayscale image", icon="IMAGE_DATA")
+            empty.label(text="Import a grayscale image", icon="IMAGE_DATA")
             empty.label(text="PNG, JPEG, TIFF, or BMP")
         else:
             image_path = runtime.library().image_path(item)
             details = layout.box()
             details.label(text=item["name"], icon="BRUSH_DATA")
             details.label(text=f"{item['width']} x {item['height']}  |  {item['settings']['tool'].replace('_', ' ').title()}")
+            target = context.object
+            has_sculpt_multires = target is not None and any(
+                modifier.type == "MULTIRES" and modifier.sculpt_levels > 0
+                for modifier in target.modifiers
+            )
+            if (
+                target is not None
+                and target.type == "MESH"
+                and target.mode == "SCULPT"
+                and len(target.data.vertices) < 100000
+                and not getattr(target, "use_dynamic_topology_sculpting", False)
+                and not has_sculpt_multires
+            ):
+                topology_warning = details.row()
+                topology_warning.alert = True
+                topology_warning.label(text="Mesh needs more detail", icon="ERROR")
+                details.operator(
+                    "sculpt.dynamic_topology_toggle",
+                    text="Enable Dyntopo",
+                    icon="SCULPTMODE_HLT",
+                )
             if not image_path.is_file():
                 missing = details.row()
                 missing.alert = True
@@ -562,6 +624,22 @@ class EKACREATEBRUSH_PT_main(Panel):
             use.operator("eka_create_brush.use", text="Use Brush", icon="SCULPTMODE_HLT").brush_id = item["id"]
             actions.operator("eka_create_brush.edit", text="", icon="PREFERENCES").brush_id = item["id"]
             actions.operator("eka_create_brush.delete", text="", icon="TRASH").brush_id = item["id"]
+
+            application_actions = layout.row(align=True)
+            stamp = application_actions.operator(
+                "eka_create_brush.use",
+                text="Stamp",
+                icon="IMAGE_DATA",
+            )
+            stamp.brush_id = item["id"]
+            stamp.application = "STAMP"
+            surface = application_actions.operator(
+                "eka_create_brush.use",
+                text="Tile Surface",
+                icon="TEXTURE",
+            )
+            surface.brush_id = item["id"]
+            surface.application = "SURFACE"
 
             active = runtime.find_runtime_brush(item["id"])
             sculpt_paint = getattr(context.tool_settings, "sculpt", None)
@@ -579,7 +657,7 @@ class EKACREATEBRUSH_Preferences(AddonPreferences):
 
     library_directory: StringProperty(
         name="Brush Folder",
-        description="Folder watched for square grayscale brush images",
+        description="Folder watched for grayscale brush images of any aspect ratio",
         subtype="DIR_PATH",
         update=_library_directory_updated,
     )

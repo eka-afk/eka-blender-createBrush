@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from array import array
 import os
 from pathlib import Path
 
@@ -30,6 +31,8 @@ TOOL_IDENTIFIERS = {
 _preview_collection = None
 _preview_items: list[tuple] = []
 _preview_stamp = None
+_preview_reload_ids: set[str] = set()
+_library_items_by_id: dict[str, dict] = {}
 _library_error = ""
 _library_warnings: list[str] = []
 _configured_library_root = ""
@@ -92,23 +95,27 @@ def analyze_brush_image(filepath: str) -> dict:
         width, height = (int(value) for value in image.size)
         if width <= 0 or height <= 0:
             raise BrushImageError("Blender could not read the image dimensions")
-        if width != height:
-            raise BrushImageError(f"Brush images must be square; this image is {width} x {height}")
-        if width > MAX_IMAGE_DIMENSION:
+        if max(width, height) > MAX_IMAGE_DIMENSION:
             raise BrushImageError(
-                f"Brush images cannot exceed {MAX_IMAGE_DIMENSION} x {MAX_IMAGE_DIMENSION} pixels"
+                f"Image dimensions cannot exceed {MAX_IMAGE_DIMENSION} pixels; "
+                f"this image is {width} x {height}"
             )
 
-        pixels = image.pixels
         pixel_count = width * height
-        sample_count = min(pixel_count, MAX_ANALYSIS_SAMPLES)
+        if pixel_count > MAX_ANALYSIS_SAMPLES:
+            sample_scale = (MAX_ANALYSIS_SAMPLES / pixel_count) ** 0.5
+            sample_width = max(1, int(width * sample_scale))
+            sample_height = max(1, int(height * sample_scale))
+            image.scale(sample_width, sample_height)
+
+        sample_count = int(image.size[0]) * int(image.size[1])
+        pixels = array("f", [0.0]) * (sample_count * 4)
+        image.pixels.foreach_get(pixels)
         minimum_luminance = 1.0
         maximum_luminance = 0.0
         maximum_chroma = 0.0
         visible_samples = 0
-        divisor = max(1, sample_count - 1)
-        for sample_index in range(sample_count):
-            pixel_index = ((sample_index * (pixel_count - 1)) // divisor) * 4
+        for pixel_index in range(0, len(pixels), 4):
             red = float(pixels[pixel_index])
             green = float(pixels[pixel_index + 1])
             blue = float(pixels[pixel_index + 2])
@@ -137,6 +144,7 @@ def analyze_brush_image(filepath: str) -> dict:
             "path": str(path),
             "width": width,
             "height": height,
+            "aspect_fitted": width != height,
             "dynamic_range": max(0.0, maximum_luminance - minimum_luminance),
             "low_contrast": (maximum_luminance - minimum_luminance) < 0.05,
         }
@@ -152,22 +160,23 @@ def analyze_brush_image(filepath: str) -> dict:
 def _metadata_stamp():
     index_path = library().index_path
     try:
-        return (index_path.stat().st_mtime_ns, index_path.stat().st_size)
+        statistics = index_path.stat()
+        return (statistics.st_mtime_ns, statistics.st_size)
     except OSError:
         return None
 
 
-def synchronize_library(*, force: bool = False) -> dict:
-    global _folder_stamp, _library_warnings
+def synchronize_library(*, force: bool = False, folder_stamp=None) -> dict:
+    global _folder_stamp, _library_items_by_id, _library_warnings, _preview_reload_ids
     brush_library = library()
-    current_stamp = brush_library.folder_stamp()
+    current_stamp = folder_stamp if folder_stamp is not None else brush_library.folder_stamp()
     if not force and _folder_stamp == current_stamp:
         items = [
             item
             for item in brush_library.items()
             if not item.get("validation_error") and brush_library.image_path(item).is_file()
         ]
-        return {
+        result = {
             "items": items,
             "added_ids": [],
             "updated_ids": [],
@@ -176,6 +185,8 @@ def synchronize_library(*, force: bool = False) -> dict:
             "invalid": [],
             "changed": False,
         }
+        _library_items_by_id = {item["id"]: item for item in items}
+        return result
 
     result = brush_library.synchronize(analyze_brush_image)
     for brush_id in {
@@ -188,25 +199,33 @@ def synchronize_library(*, force: bool = False) -> dict:
         f"{entry['image']}: {entry['error']}"
         for entry in result["invalid"]
     ]
-    _folder_stamp = brush_library.folder_stamp()
+    _preview_reload_ids.update(result["added_ids"])
+    _preview_reload_ids.update(result["updated_ids"])
+    _library_items_by_id = {item["id"]: item for item in result["items"]}
+    _folder_stamp = current_stamp
     return result
 
 
 def clear_previews() -> None:
-    global _preview_collection, _preview_items, _preview_stamp
+    global _library_items_by_id, _preview_collection, _preview_items
+    global _preview_reload_ids, _preview_stamp
     if _preview_collection is not None:
         bpy.utils.previews.remove(_preview_collection)
     _preview_collection = None
     _preview_items = []
     _preview_stamp = None
+    _preview_reload_ids.clear()
+    _library_items_by_id = {}
 
 
 def refresh_previews(*, force: bool = False, synchronize: bool = True) -> list[tuple]:
-    global _preview_collection, _preview_items, _preview_stamp, _library_error
+    global _library_error, _library_items_by_id, _preview_collection, _preview_items
+    global _preview_stamp
+    synchronization_result = None
     try:
         if synchronize:
-            synchronize_library(force=force)
-        stamp = (_metadata_stamp(), library().folder_stamp())
+            synchronization_result = synchronize_library(force=force)
+        stamp = (_metadata_stamp(), _folder_stamp)
     except BrushLibraryError as error:
         _library_error = str(error)
         clear_previews()
@@ -215,15 +234,28 @@ def refresh_previews(*, force: bool = False, synchronize: bool = True) -> list[t
     if not force and _preview_collection is not None and stamp == _preview_stamp:
         return _preview_items
 
-    clear_previews()
-    _preview_collection = bpy.utils.previews.new()
+    if _preview_collection is None:
+        _preview_collection = bpy.utils.previews.new()
     _preview_stamp = stamp
     try:
-        items = [item for item in library().items() if not item.get("validation_error")]
+        if synchronization_result is not None:
+            items = synchronization_result["items"]
+        else:
+            brush_library = library()
+            items = [
+                item
+                for item in brush_library.items()
+                if not item.get("validation_error") and brush_library.image_path(item).is_file()
+            ]
         _library_error = ""
     except BrushLibraryError as error:
         _library_error = str(error)
         items = []
+
+    _library_items_by_id = {item["id"]: item for item in items}
+    visible_ids = set(_library_items_by_id)
+    for brush_id in set(_preview_collection) - visible_ids:
+        del _preview_collection[brush_id]
 
     enum_items = []
     used_numbers = set()
@@ -234,7 +266,18 @@ def refresh_previews(*, force: bool = False, synchronize: bool = True) -> list[t
         description = f"{item.get('width', '?')} x {item.get('height', '?')} grayscale brush"
         if image_path.is_file():
             try:
-                preview = _preview_collection.load(brush_id, str(image_path), "IMAGE", force_reload=True)
+                if brush_id in _preview_collection and brush_id in _preview_reload_ids:
+                    del _preview_collection[brush_id]
+                preview = (
+                    _preview_collection[brush_id]
+                    if brush_id in _preview_collection
+                    else _preview_collection.load(
+                        brush_id,
+                        str(image_path),
+                        "IMAGE",
+                        force_reload=brush_id in _preview_reload_ids,
+                    )
+                )
                 icon_id = preview.icon_id
             except (KeyError, OSError, RuntimeError):
                 description = f"Preview unavailable - {description}"
@@ -252,6 +295,7 @@ def refresh_previews(*, force: bool = False, synchronize: bool = True) -> list[t
             (brush_id, str(item.get("name", "Untitled Brush")), description, icon_id, enum_number)
         )
     _preview_items = enum_items
+    _preview_reload_ids.difference_update(visible_ids)
     return _preview_items
 
 
@@ -279,7 +323,7 @@ def _watch_library():
     try:
         current_stamp = library().folder_stamp()
         if current_stamp != _folder_stamp:
-            synchronize_library(force=True)
+            synchronize_library(force=True, folder_stamp=current_stamp)
             items = refresh_previews(force=True, synchronize=False)
             _repair_selections(items)
             _tag_sidebar_redraw()
@@ -305,7 +349,7 @@ def stop_library_watcher() -> None:
 
 
 def preview_items(search: str = "") -> list[tuple]:
-    items = refresh_previews()
+    items = refresh_previews() if _preview_collection is None else _preview_items
     query = search.strip().casefold()
     if query:
         items = [item for item in items if query in item[1].casefold()]
@@ -313,6 +357,12 @@ def preview_items(search: str = "") -> list[tuple]:
         message = "No matching brushes" if query else "No brushes imported"
         return [("__EMPTY__", message, message, 0, 1)]
     return items
+
+
+def cached_library_item(brush_id: str) -> dict | None:
+    if _preview_collection is None:
+        refresh_previews()
+    return _library_items_by_id.get(brush_id)
 
 
 def _has_tag(data_block, brush_id: str) -> bool:
@@ -386,7 +436,7 @@ def _ensure_runtime_texture(item: dict, image):
     texture.image = image
     texture.use_fake_user = True
     if hasattr(texture, "extension"):
-        texture.extension = "EXTEND"
+        texture.extension = "REPEAT" if item["settings"]["mapping"] == "TILED" else "CLIP"
     invert = item["settings"]["invert"]
     texture.use_color_ramp = invert
     if invert:
@@ -406,6 +456,16 @@ def _new_sculpt_brush(name: str):
         if hasattr(brush, "use_paint_sculpt"):
             brush.use_paint_sculpt = True
         return brush
+
+
+def image_aspect_scale(width: int, height: int) -> tuple[float, float, float]:
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if width > height:
+        return (1.0, width / height, 1.0)
+    if height > width:
+        return (height / width, 1.0, 1.0)
+    return (1.0, 1.0, 1.0)
 
 
 def ensure_runtime_brush(item: dict):
@@ -443,6 +503,13 @@ def ensure_runtime_brush(item: dict):
     _set_enum_value(brush, "sculpt_brush_type", settings["tool"], "DRAW")
     _set_enum_value(brush, "stroke_method", settings["stroke_method"], "SPACE")
     _set_enum_value(brush.texture_slot, "map_mode", settings["mapping"], "AREA_PLANE")
+    brush.texture_slot.scale = image_aspect_scale(item["width"], item["height"])
+    uses_spaced_stroke = settings["stroke_method"] == "SPACE"
+    _set_enum_value(brush, "use_scene_spacing", "SCENE" if uses_spaced_stroke else "VIEW", "VIEW")
+    if hasattr(brush, "use_adaptive_space"):
+        brush.use_adaptive_space = uses_spaced_stroke
+    if hasattr(brush, "use_space_attenuation"):
+        brush.use_space_attenuation = True
     falloff = "MAX" if settings["falloff"] == "CONSTANT" else settings["falloff"]
     _set_enum_value(brush, "curve_preset", falloff, "SMOOTH")
     _set_enum_value(brush, "curve_distance_falloff_preset", falloff, "SMOOTH")
